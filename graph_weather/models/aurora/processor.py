@@ -1,5 +1,6 @@
 """
-Perceiver Transformer Processor:
+Perceiver Transformer Processor.
+
 - Takes encoded features and processes them using latent space mapping.
 - Uses a latent-space bottleneck to compress input dimensions.
 - Provides an efficient way to extract long-range dependencies.
@@ -15,6 +16,13 @@ import torch.nn as nn
 
 @dataclass
 class ProcessorConfig:
+    """Architectural parameters of the Perceiver processor.
+
+    The values are checked when the dataclass is created: input_dim, max_seq_len and
+    num_attention_heads have to be positive, and both dropout probabilities have to lie
+    between 0 and 1.
+    """
+
     input_dim: int = 256  # Match Swin3D output
     latent_dim: int = 512
     d_model: int = 256  # Match input_dim for consistency
@@ -43,7 +51,20 @@ class ProcessorConfig:
 
 
 class PerceiverProcessor(nn.Module):
+    """Processes encoded features into a single latent vector per sample.
+
+    The input is projected to the model dimension, passed through a stack of transformer
+    encoder layers and projected to the latent dimension. The resulting sequence is then
+    averaged over its length, so the sequence is compressed into one vector.
+    """
+
     def __init__(self, config: Optional[ProcessorConfig] = None):
+        """Build the input projection, the transformer encoder and the output projection.
+
+        Args:
+            config (Optional[ProcessorConfig]): architectural parameters of the processor.
+                A default ProcessorConfig is used when None. Defaults to None.
+        """
         super().__init__()
         self.config = config or ProcessorConfig()
 
@@ -66,6 +87,18 @@ class PerceiverProcessor(nn.Module):
         self.output_projection = nn.Linear(self.config.d_model, self.config.latent_dim)
 
     def forward(self, x, attention_mask=None):
+        """Encode a sequence of features and pool it into one latent vector per sample.
+
+        Args:
+            x (torch.Tensor): input features of shape (batch, seq, input_dim). A 4D input is
+                rearranged into a sequence before the projection.
+            attention_mask (torch.Tensor, optional): mask of shape (batch, seq) where True
+                marks the positions to attend to. It is inverted and turned into an additive
+                float mask before being passed to the encoder. Defaults to None.
+
+        Returns:
+            torch.Tensor: latent representation of shape (batch, latent_dim).
+        """
         # Handle 4D input using einops for clearer reshaping
         if len(x.shape) == 4:
             # Rearrange from (batch, seq, height, width) to (batch, seq*height*width, features)

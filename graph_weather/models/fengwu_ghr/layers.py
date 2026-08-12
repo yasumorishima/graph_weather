@@ -1,3 +1,11 @@
+"""Building blocks of the FengWu-GHR model.
+
+Contains the vision transformer layers (patch embedding, attention, feed-forward) used
+to process data laid out as a regular image, the k-nearest-neighbour interpolation that
+moves features between an irregular set of lat/lon points and that regular grid, and the
+LoRA layers used to fine-tune a pretrained model.
+"""
+
 import torch
 from einops import rearrange
 from einops.layers.torch import Rearrange
@@ -7,12 +15,38 @@ from torch_geometric.utils import scatter
 
 
 def pair(t):
+    """Duplicate a value into a pair, leaving tuples untouched.
+
+    Args:
+        t: either a tuple, which is returned unchanged, or a single value to repeat.
+
+    Returns:
+        The input itself if it already is a tuple, the pair (t, t) otherwise.
+    """
     return t if isinstance(t, tuple) else (t, t)
 
 
 def knn_interpolate(
     x: torch.Tensor, pos_x: torch.Tensor, pos_y: torch.Tensor, k: int = 4, num_workers: int = 1
 ):
+    """Interpolate features from one set of positions onto another one.
+
+    Every target position takes the average of the features of its k nearest source
+    positions, weighted by the inverse of the squared distance to them.
+
+    Args:
+        x (torch.Tensor): features of the source points, of shape
+            (num_source_points, num_features).
+        pos_x (torch.Tensor): coordinates of the source points, of shape
+            (num_source_points, num_dimensions).
+        pos_y (torch.Tensor): coordinates of the target points, of shape
+            (num_target_points, num_dimensions).
+        k (int): number of neighbours averaged for each target point. Defaults to 4.
+        num_workers (int): number of workers used by the neighbour search. Defaults to 1.
+
+    Returns:
+        torch.Tensor: interpolated features, of shape (num_target_points, num_features).
+    """
     with torch.no_grad():
         assign_index = knn(pos_x, pos_y, k, num_workers=num_workers)
         y_idx, x_idx = assign_index[0], assign_index[1]
@@ -32,6 +66,23 @@ def knn_interpolate(
 
 
 def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype=torch.float32):
+    """Build a two dimensional sine-cosine positional embedding.
+
+    Each of the h * w positions of the grid is encoded with the sines and the cosines of
+    its row and column indices at dim // 4 geometrically spaced frequencies, so that dim
+    has to be a multiple of four.
+
+    Args:
+        h (int): number of rows of the grid.
+        w (int): number of columns of the grid.
+        dim (int): size of the embedding, must be divisible by 4.
+        temperature (int): base of the geometric progression of the frequencies.
+            Defaults to 10000.
+        dtype (torch.dtype): dtype of the returned embedding. Defaults to torch.float32.
+
+    Returns:
+        torch.Tensor: positional embedding of shape (h * w, dim).
+    """
     y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
     assert (dim % 4) == 0, "feature dimension must be multiple of 4 for sincos emb"
     omega = torch.arange(dim // 4) / (dim // 4 - 1)
@@ -47,7 +98,15 @@ def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype=torch.float32):
 
 
 class FeedForward(nn.Module):
+    """Two layer perceptron with a GELU activation, applied to layer normalised input."""
+
     def __init__(self, dim, hidden_dim):
+        """Initialize FeedForward.
+
+        Args:
+            dim (int): size of both the input and the output features.
+            hidden_dim (int): size of the hidden layer.
+        """
         super().__init__()
         self.net = nn.Sequential(
             nn.LayerNorm(dim),
@@ -57,11 +116,28 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
+        """Apply the perceptron to the input.
+
+        Args:
+            x (torch.Tensor): input tensor of shape (..., dim).
+
+        Returns:
+            torch.Tensor: output tensor of shape (..., dim).
+        """
         return self.net(x)
 
 
 class Attention(nn.Module):
+    """Multi-head self attention, applied to layer normalised input."""
+
     def __init__(self, dim, heads=8, dim_head=64):
+        """Initialize Attention.
+
+        Args:
+            dim (int): size of both the input and the output features.
+            heads (int): number of attention heads. Defaults to 8.
+            dim_head (int): size of each attention head. Defaults to 64.
+        """
         super().__init__()
         inner_dim = dim_head * heads
         self.heads = heads
@@ -74,6 +150,14 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim, bias=False)
 
     def forward(self, x):
+        """Let every token of the sequence attend to all the others.
+
+        Args:
+            x (torch.Tensor): input tensor of shape (batch, sequence, dim).
+
+        Returns:
+            torch.Tensor: output tensor of shape (batch, sequence, dim).
+        """
         x = self.norm(x)
 
         qkv = self.to_qkv(x).chunk(3, dim=-1)
@@ -89,9 +173,30 @@ class Attention(nn.Module):
 
 
 class Transformer(nn.Module):
+    """Stack of attention and feed-forward blocks joined by residual connections.
+
+    When res is set, each block is followed by a further attention taken across the
+    windows a single image was split into, so that tokens sitting in different windows
+    can still see each other.
+    """
+
     def __init__(
         self, dim, depth, heads, dim_head, mlp_dim, res=False, image_size=None, scale_factor=None
     ):
+        """Initialize Transformer.
+
+        Args:
+            dim (int): size of the token features.
+            depth (int): number of attention and feed-forward blocks.
+            heads (int): number of attention heads of each block.
+            dim_head (int): size of each attention head.
+            mlp_dim (int): size of the hidden layer of the feed-forward blocks.
+            res (bool): whether to add the attention across windows. Defaults to False.
+            image_size (int or tuple): number of rows and columns of tokens of a single
+                window, required when res is True. Defaults to None.
+            scale_factor (int or tuple): number of windows along the rows and along the
+                columns, required when res is True. Defaults to None.
+        """
         super().__init__()
         self.depth = depth
         self.res = res
@@ -136,6 +241,14 @@ class Transformer(nn.Module):
                 )
 
     def forward(self, x):
+        """Run the input through every block of the stack.
+
+        Args:
+            x (torch.Tensor): input tensor of shape (batch, sequence, dim).
+
+        Returns:
+            torch.Tensor: normalised output tensor of shape (batch, sequence, dim).
+        """
         for i in range(self.depth):
             attn, ff = self.layers[i]
             x = attn(x) + x
@@ -149,6 +262,13 @@ class Transformer(nn.Module):
 
 
 class ImageMetaModel(nn.Module):
+    """Vision transformer operating on data laid out as a regular image.
+
+    The image is cut into patches, each patch is embedded and summed with a sine-cosine
+    positional embedding, the resulting tokens are processed by a Transformer and finally
+    folded back into an image of the same shape as the input.
+    """
+
     def __init__(
         self,
         *,
@@ -163,6 +283,24 @@ class ImageMetaModel(nn.Module):
         scale_factor=None,
         **kwargs,
     ):
+        """Initialize ImageMetaModel.
+
+        Args:
+            image_size (int or tuple): number of rows and columns of the input image.
+            patch_size (int or tuple): number of rows and columns of a single patch, it
+                has to divide the image size.
+            depth (int): number of blocks of the transformer.
+            heads (int): number of attention heads of each block.
+            mlp_dim (int): size of the hidden layer of the feed-forward blocks.
+            channels (int): number of channels of the input image.
+            dim_head (int): size of each attention head.
+            res (bool): whether the transformer also attends across windows, which is
+                what the wrappers below rely on. Defaults to False.
+            scale_factor (int or tuple): number of windows along the rows and along the
+                columns, required when res is True. Defaults to None.
+            **kwargs: further keyword arguments are ignored, so that a model can be
+                rebuilt from the attributes of another one.
+        """
         super().__init__()
         # TODO this can probably be done better
         self.image_size = image_size
@@ -229,6 +367,14 @@ class ImageMetaModel(nn.Module):
         )
 
     def forward(self, x):
+        """Embed the image into patches, run the transformer and fold the tokens back.
+
+        Args:
+            x (torch.Tensor): input image of shape (batch, channels, height, width).
+
+        Returns:
+            torch.Tensor: output image of the same shape as the input.
+        """
         assert x.shape[1] == self.channels, "Wrong number of channels"
         device = x.device
         dtype = x.dtype
@@ -243,7 +389,22 @@ class ImageMetaModel(nn.Module):
 
 
 class WrapperImageModel(nn.Module):
+    """Reuse a trained ImageMetaModel on an image of a higher resolution.
+
+    The image is split into scale_factor windows that are stacked along the batch
+    dimension, so that each of them has the resolution the wrapped model was built for.
+    The weights of that model are loaded into a new one whose transformer also attends
+    across the windows.
+    """
+
     def __init__(self, image_meta_model: ImageMetaModel, scale_factor):
+        """Initialize WrapperImageModel.
+
+        Args:
+            image_meta_model (ImageMetaModel): model whose settings and weights are reused.
+            scale_factor (int or tuple): number of windows along the rows and along the
+                columns.
+        """
         super().__init__()
         s_h, s_w = pair(scale_factor)
         self.batcher = Rearrange("b c (h s_h) (w s_w) -> (b s_h s_w) c h w", s_h=s_h, s_w=s_w)
@@ -256,6 +417,14 @@ class WrapperImageModel(nn.Module):
         self.debatcher = Rearrange("(b s_h s_w) c h w -> b c (h s_h) (w s_w)", s_h=s_h, s_w=s_w)
 
     def forward(self, x):
+        """Split the image into windows, run the wrapped model and stitch them back.
+
+        Args:
+            x (torch.Tensor): input image of shape (batch, channels, height, width).
+
+        Returns:
+            torch.Tensor: output image of the same shape as the input.
+        """
         x = self.batcher(x)
         x = self.image_meta_model(x)
         x = self.debatcher(x)
@@ -263,6 +432,12 @@ class WrapperImageModel(nn.Module):
 
 
 class MetaModel(nn.Module):
+    """ImageMetaModel applied to data given on an irregular set of lat/lon points.
+
+    The features of the points are interpolated onto a regular latitude/longitude grid,
+    processed as an image and interpolated back onto the original points.
+    """
+
     def __init__(
         self,
         lat_lons: list,
@@ -275,6 +450,19 @@ class MetaModel(nn.Module):
         channels,
         dim_head=64,
     ):
+        """Initialize MetaModel.
+
+        Args:
+            lat_lons (list): latitude and longitude of each point of the input.
+            image_size (int or tuple): number of rows and columns of the grid the points
+                are interpolated onto.
+            patch_size (int or tuple): number of rows and columns of a single patch.
+            depth (int): number of blocks of the transformer.
+            heads (int): number of attention heads of each block.
+            mlp_dim (int): size of the hidden layer of the feed-forward blocks.
+            channels (int): number of channels of the input.
+            dim_head (int): size of each attention head. Defaults to 64.
+        """
         super().__init__()
         self.i_h, self.i_w = pair(image_size)
 
@@ -295,6 +483,14 @@ class MetaModel(nn.Module):
         )
 
     def forward(self, x):
+        """Interpolate the points onto the grid, run the model and interpolate back.
+
+        Args:
+            x (torch.Tensor): input features of shape (batch, num_points, channels).
+
+        Returns:
+            torch.Tensor: output features of the same shape as the input.
+        """
         b, n, c = x.shape
 
         x = rearrange(x, "b n c -> n (b c)")
@@ -309,7 +505,23 @@ class MetaModel(nn.Module):
 
 
 class WrapperMetaModel(nn.Module):
+    """Reuse a trained MetaModel on lat/lon data of a higher resolution.
+
+    The points are interpolated onto a grid scale_factor times finer than the one of the
+    wrapped model, that grid is split into windows stacked along the batch dimension, and
+    the weights of the wrapped model are loaded into a new one whose transformer also
+    attends across the windows.
+    """
+
     def __init__(self, lat_lons: list, meta_model: MetaModel, scale_factor):
+        """Initialize WrapperMetaModel.
+
+        Args:
+            lat_lons (list): latitude and longitude of each point of the input.
+            meta_model (MetaModel): model whose settings and weights are reused.
+            scale_factor (int or tuple): number of windows along the rows and along the
+                columns.
+        """
         super().__init__()
         s_h, s_w = pair(scale_factor)
         self.i_h, self.i_w = meta_model.i_h * s_h, meta_model.i_w * s_w
@@ -331,6 +543,14 @@ class WrapperMetaModel(nn.Module):
         self.debatcher = Rearrange("(b s_h s_w) c h w -> b c (h s_h) (w s_w)", s_h=s_h, s_w=s_w)
 
     def forward(self, x):
+        """Interpolate onto the finer grid, run the wrapped model and interpolate back.
+
+        Args:
+            x (torch.Tensor): input features of shape (batch, num_points, channels).
+
+        Returns:
+            torch.Tensor: output features of the same shape as the input.
+        """
         b, n, c = x.shape
 
         x = rearrange(x, "b n c -> n (b c)")
@@ -349,6 +569,13 @@ class WrapperMetaModel(nn.Module):
 
 
 class LoRALayer(nn.Module):
+    """Linear layer paired with a trainable low-rank update.
+
+    The output of the wrapped layer is summed with B @ A @ x, where A and B are the two
+    factors of a rank r matrix. B starts at zero, so the layer initially behaves exactly
+    like the one it wraps.
+    """
+
     def __init__(self, linear_layer: nn.Module, r: int):
         """
         Initialize LoRALayer.
@@ -365,11 +592,25 @@ class LoRALayer(nn.Module):
         self.linear_layer = linear_layer
 
     def forward(self, x):
+        """Sum the output of the wrapped layer with the low-rank update.
+
+        Args:
+            x (torch.Tensor): input tensor accepted by the wrapped linear layer.
+
+        Returns:
+            torch.Tensor: output of the wrapped layer plus the low-rank correction.
+        """
         out = self.linear_layer(x) + self.B @ self.A @ x
         return out
 
 
 class LoRAModule(nn.Module):
+    """Model whose linear layers are replaced by their LoRALayer counterparts.
+
+    Every submodule is put in evaluation mode before each nn.Linear is wrapped, so that
+    the low-rank factors are the only parameters left to train.
+    """
+
     def __init__(self, model, r=4):
         """
         Initialize LoRAModule.
@@ -387,4 +628,12 @@ class LoRAModule(nn.Module):
         self.model = model
 
     def forward(self, x):
+        """Run the modified model on the input.
+
+        Args:
+            x (torch.Tensor): input tensor accepted by the wrapped model.
+
+        Returns:
+            torch.Tensor: output of the wrapped model.
+        """
         return self.model(x)

@@ -1,3 +1,5 @@
+"""Train a FengWu-GHR style model on ERA5 reanalysis data with PyTorch Lightning."""
+
 from pathlib import Path
 
 import numpy as np
@@ -45,12 +47,16 @@ class LitFengWuGHR(pl.LightningModule):
         Initialize the LitFengWuGHR object with the required args.
 
         Args:
-            lat_lons : List of latitude and longitude values.
-            feature_dim : Dimensionality of the input features.
-            aux_dim : Dimensionality of auxiliary features.
-            hidden_dim : Dimensionality of hidden layers in the model.
-            num_blocks : Number of graph convolutional blocks in the model.
-            lr (float): Learning rate for optimizer.
+            lat_lons (list): List of (lat, lon) points describing the grid.
+            channels (int): Number of channels of the input and output fields.
+            image_size: Spatial size (height, width) of the grid the model works on.
+            patch_size (int): Patch size of the underlying ``MetaModel``. Defaults to 4.
+            depth (int): Number of blocks in the underlying model. Defaults to 5.
+            heads (int): Number of attention heads. Defaults to 4.
+            mlp_dim (int): Hidden dimension of the MLP blocks. Defaults to 5.
+            feature_dim (int): Number of features used to build the unit feature
+                variance passed to the loss. Defaults to 605.
+            lr (float): Learning rate for optimizer. Defaults to 3e-4.
         """
         super().__init__()
         self.model = MetaModel(
@@ -113,9 +119,13 @@ class Era5Dataset(Dataset):
     """Era5 dataset."""
 
     def __init__(self, xarr, transform=None):
-        """
-        Arguments:
-            #TODO
+        """Normalize the reanalysis data and store it as a flat sequence of nodes.
+
+        Args:
+            xarr (xarray.Dataset): Reanalysis data which, once converted to an array,
+                has dimensions (channel, time, height, width).
+            transform: Optional sample transform. It is accepted for compatibility with
+                the dataset API but is not applied here.
         """
         ds = np.asarray(xarr.to_array())
         ds = torch.from_numpy(ds)

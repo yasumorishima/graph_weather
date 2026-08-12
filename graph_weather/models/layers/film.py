@@ -1,3 +1,9 @@
+"""FiLM layers conditioning features on a lead time.
+
+Feature-wise Linear Modulation turns a lead-time index into a pair of scale and bias
+vectors (gamma and beta) which are then applied elementwise to a feature tensor.
+"""
+
 import torch
 import torch.nn as nn
 
@@ -16,6 +22,15 @@ class FiLMGenerator(nn.Module):
     """
 
     def __init__(self, num_lead_times: int, hidden_dim: int, feature_dim: int):
+        """Build the MLP that maps a one-hot lead time to gamma and beta.
+
+        Args:
+            num_lead_times (int): Number of possible lead-time categories, i.e. the
+                length of the one-hot input vector.
+            hidden_dim (int): Hidden size of the internal MLP.
+            feature_dim (int): Dimensionality of gamma and of beta; the MLP outputs
+                ``2 * feature_dim`` values which are then split in half.
+        """
         super().__init__()
         self.num_lead_times = num_lead_times
         self.feature_dim = feature_dim

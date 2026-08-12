@@ -1,3 +1,10 @@
+"""Train a multi-step FengWu-GHR style model with LoRA adapters on ERA5 data.
+
+A checkpoint of a trained single-step ``MetaModel`` is loaded and reused for the
+first forecast step; every later step applies a LoRA-wrapped copy of that model, so
+the rollout is trained by learning only the low-rank adapters.
+"""
+
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +21,19 @@ from graph_weather.models.losses import NormalizedMSELoss
 
 
 class LitLoRAFengWuGHR(pl.LightningModule):
+    """LightningModule rolling a single-step model out over several time steps.
+
+    The pretrained single-step model is applied autoregressively; each step after the
+    first wraps the same model in a ``LoRAModule``, so only the low-rank adapters differ
+    between lead times.
+
+    Attributes:
+        models (nn.ModuleList): The single-step model followed by ``time_step - 1``
+            LoRA-wrapped copies of it.
+        criterion (NormalizedMSELoss): Loss criterion used for training.
+        lr (float): Learning rate for the optimizer.
+    """
+
     def __init__(
         self,
         lat_lons: list,
@@ -30,6 +50,25 @@ class LitLoRAFengWuGHR(pl.LightningModule):
         feature_dim: int = 605,  # TODO where does this come from?
         lr: float = 3e-4,
     ):
+        """Build the LoRA rollout from a trained single-step model.
+
+        Args:
+            lat_lons (list): List of (lat, lon) points describing the grid.
+            single_step_model_state_dict (dict): State dict of a trained single-step
+                ``MetaModel``, loaded into the first model of the rollout.
+            time_step (int): Number of forecast steps to roll out. Must be greater
+                than 1, as 1 is the single-step model on its own.
+            rank (int): Rank of the LoRA adapters used for the steps after the first.
+            channels (int): Number of channels of the input and output fields.
+            image_size: Spatial size (height, width) of the grid the model works on.
+            patch_size (int): Patch size of the underlying ``MetaModel``. Defaults to 4.
+            depth (int): Number of blocks in the underlying model. Defaults to 5.
+            heads (int): Number of attention heads. Defaults to 4.
+            mlp_dim (int): Hidden dimension of the MLP blocks. Defaults to 5.
+            feature_dim (int): Number of features used to build the unit feature
+                variance passed to the loss. Defaults to 605.
+            lr (float): Learning rate for the optimizer. Defaults to 3e-4.
+        """
         super().__init__()
         assert (
             time_step > 1
@@ -54,6 +93,15 @@ class LitLoRAFengWuGHR(pl.LightningModule):
         self.save_hyperparameters()
 
     def forward(self, x):
+        """Roll the models out, feeding each output into the next model.
+
+        Args:
+            x (torch.Tensor): Input state for the first forecast step.
+
+        Returns:
+            torch.Tensor: The prediction of every step, stacked along a new second
+                dimension.
+        """
         ys = []
         for t, model in enumerate(self.models):
             x = model(x)
@@ -61,6 +109,16 @@ class LitLoRAFengWuGHR(pl.LightningModule):
         return torch.stack(ys, dim=1)
 
     def training_step(self, batch, batch_idx):
+        """Run a single training step on a batch of consecutive states.
+
+        Args:
+            batch (torch.Tensor): Batch whose second dimension is time; index 0 is the
+                input state and the remaining indices are the targets.
+            batch_idx (int): Index of the current batch.
+
+        Returns:
+            torch.Tensor: The loss, or None if the batch contains NaNs.
+        """
         if torch.isnan(batch).any():
             return None
         x, ys = batch[:, 0, ...], batch[:, 1:, ...]
@@ -71,11 +129,33 @@ class LitLoRAFengWuGHR(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
+        """Configure the optimizer.
+
+        Returns:
+            torch.optim.Optimizer: AdamW over all parameters, using ``self.lr``.
+        """
         return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
 class Era5Dataset(Dataset):
+    """ERA5 dataset yielding windows of consecutive time steps.
+
+    The data is loaded into memory, scaled per grid point to the [0, 1] range along the
+    time axis, and reshaped to (time, height * width, channels).
+    """
+
     def __init__(self, xarr, time_step=1, transform=None):
+        """Normalize the reanalysis data and store it as a flat sequence of nodes.
+
+        Args:
+            xarr (xarray.Dataset): Reanalysis data which, once converted to an array,
+                has dimensions (channel, time, height, width).
+            time_step (int): Number of steps between the first and last state of a
+                sample, so each sample holds ``time_step + 1`` consecutive states.
+                Must be greater than 0. Defaults to 1.
+            transform: Optional sample transform. It is accepted for compatibility with
+                the dataset API but is not applied here.
+        """
         assert time_step > 0, "Time step must be greater than 0."
         ds = np.asarray(xarr.to_array())
         ds = torch.from_numpy(ds)

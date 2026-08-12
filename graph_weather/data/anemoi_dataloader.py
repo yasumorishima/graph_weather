@@ -1,3 +1,9 @@
+"""Dataset exposing Anemoi datasets to graph_weather.
+
+The requested variables are normalized with user supplied means and standard
+deviations, flattened over the grid and concatenated with cyclical clock features.
+"""
+
 import logging
 
 import numpy as np
@@ -31,6 +37,29 @@ class AnemoiDataset(Dataset):
         max_samples: int = None,
         **kwargs,
     ):
+        """Open the Anemoi dataset and check its features and grid.
+
+        Args:
+            dataset_name (str): Name of the Anemoi dataset, e.g.
+                "era5-o48-2020-2021-6h-v1".
+            features (list[str]): Atmospheric variables to read from the dataset.
+            means (dict): Mean of each feature, used for normalization. Every entry of
+                ``features`` must be present.
+            stds (dict): Standard deviation of each feature, used for normalization.
+                Every entry of ``features`` must be present.
+            time_range (tuple): Optional (start_date, end_date) added to the dataset
+                configuration. Defaults to None.
+            time_step (int): Number of steps between the input and the target sample.
+                Defaults to 1.
+            max_samples (int): Optional upper bound on the number of samples of the
+                dataset. Defaults to None.
+            **kwargs: Further entries merged into the Anemoi dataset configuration.
+
+        Raises:
+            ValueError: If normalization statistics are missing, if a requested feature
+                is absent, or if no latitude/longitude coordinates are found.
+            RuntimeError: If the Anemoi dataset cannot be opened.
+        """
         super().__init__()
 
         self.features = features

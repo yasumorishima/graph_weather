@@ -1,5 +1,6 @@
 """
-Swin 3D Transformer Encoder:
+Swin 3D Transformer Encoder.
+
 - Uses a 3D convolution for initial feature extraction.
 - Applies layer normalization and reshapes data.
 - Uses a transformer-based encoder to learn spatial-temporal features.
@@ -11,7 +12,21 @@ from einops.layers.torch import Rearrange
 
 
 class Swin3DEncoder(nn.Module):
+    """Encodes a 3D volume into a sequence of embeddings.
+
+    A 3D convolution lifts the input channels to the embedding dimension, the result is
+    layer normalized and flattened over the depth, height and width axes, and the sequence
+    obtained this way is passed through the encoder half of a transformer.
+    """
+
     def __init__(self, in_channels=1, embed_dim=96):
+        """Build the convolution, the normalization and the transformer.
+
+        Args:
+            in_channels (int): number of channels of the input volume. Defaults to 1.
+            embed_dim (int): dimension of the embedding produced for each voxel, and model
+                dimension of the transformer. Defaults to 96.
+        """
         super().__init__()
         self.conv1 = nn.Conv3d(in_channels, embed_dim, kernel_size=3, padding=1, stride=1)
         self.norm = nn.LayerNorm(embed_dim)
@@ -30,6 +45,18 @@ class Swin3DEncoder(nn.Module):
 
     # To use rearrange function directly instead of the Rearrange layer
     def forward(self, x):
+        """Encode a volume into a flat sequence of embeddings.
+
+        The convolution keeps the spatial size, so the sequence has one element per voxel of
+        the input volume.
+
+        Args:
+            x (torch.Tensor): input volume of shape (batch, in_channels, depth, height,
+                width).
+
+        Returns:
+            torch.Tensor: sequence of shape (batch, depth * height * width, embed_dim).
+        """
         # 3D convolution with einops rearrangement
         x = self.conv1(x)
 
